@@ -4,7 +4,7 @@ A self-hostable authentication service, plus a Spring Boot client you drop into 
 
 Argus issues and rotates tokens. Everything else validates them **locally** — no network call to Argus on the request path.
 
-> **Status: early.** The multi-module skeleton builds. None of the auth logic is implemented yet. See [Roadmap](#roadmap).
+> **Status: early.** The skeleton builds and the Flyway schema is in place. The service code is being written by hand, class by class — see [Build reference](#build-reference) for the order and what each class owes.
 
 ---
 
@@ -115,30 +115,78 @@ Errors share one shape: `{ code, message, traceId, timestamp }`. Login failures 
 
 ## Design
 
-The server is layered, and the dependency arrow only points inward:
-
-```
-web  →  application  →  domain
-```
+Flat Spring MVC: `controller → service → repository`. There is no port/adapter layer and no separate domain model — JPA entities *are* the model, and services talk to Spring Data repositories directly. The earlier hexagonal version of this service is in history at `b08ee41`; it was dropped because a mapper and a port interface per repository bought nothing at this size and made the auth flow hard to read end to end.
 
 ```
 com.rcadium.argus
-├── domain/          entities + repository interfaces. No Spring, no JPA.
-│   └── port/
-├── application/     AuthService, strategies, token services
-└── infrastructure/
-    ├── persistence/ JPA entities + adapters implementing the domain ports
-    ├── security/    filter chain, key management
-    └── web/         controllers, exception handling
+├── ArgusServerApplication.java
+├── config/            ClockConfiguration, TokenProperties, SecurityConfig, JwtKeyConfiguration
+├── controller/        AuthController, UserController, AdminUserController, JwksController, ApiExceptionHandler
+├── dto/               LoginRequest, RegisterRequest, RefreshRequest, TokenResponse, ErrorResponse
+├── enums/             AuthMethod, UserStatus, ErrorCode
+├── exception/         ArgusException + one subclass per failure mode
+├── entity/            UserEntity, RoleEntity, PermissionEntity, RefreshTokenEntity, AuthIdentityEntity
+├── repository/        UserJpaRepository, RoleJpaRepository, RefreshTokenJpaRepository, AuthIdentityJpaRepository
+├── service/
+│   ├── AuthService.java              resolve strategy → authenticate → issue token pair
+│   ├── RefreshTokenService.java      rotation, reuse detection, family revocation
+│   ├── TokenIssuerService.java       builds and signs the access-token JWT
+│   ├── JwtKeyService.java            active signing key + the JWKS view of all valid keys
+│   └── auth/
+│       ├── AuthenticationStrategy.java          interface — one per login method
+│       ├── AuthenticationStrategyRegistry.java  Map<AuthMethod, Strategy>, built from List<Strategy>
+│       ├── AuthCredentials.java                 sealed marker for strategy input
+│       └── strategy/
+│           └── EmailPasswordAuthenticationStrategy.java
+└── util/
 ```
 
-`domain` imports nothing from the layers above it. If a domain class ever needs a Spring context to be unit-tested, that rule has been broken.
-
-Each authentication method is an `AuthenticationStrategy` resolved from a registry at runtime. The design constraint, which is really the point of the project:
+The registry is keyed lookup, not an `if`-chain, so each authentication method is self-contained. The design constraint, which is really the point of the project:
 
 > Adding Google login should add files and change none.
 
-If a new provider forces an edit to `AuthService` or a controller, the extension point was in the wrong place.
+If a new provider forces an edit to `AuthService` or a controller, the extension point was in the wrong place. Production concerns arrive later as plain services in the same `service/` package — `LoginAttemptService` (lockout and rate limiting), `AuditService`, `SessionService` (device-scoped refresh families) — never as new layers.
+
+---
+
+## Build reference
+
+Written by hand in this order; each step compiles and is testable before the next one starts.
+
+```mermaid
+graph TD
+    A[enums + exception] --> B[entity + repository]
+    B --> C[JwtKeyService + TokenIssuerService]
+    C --> D[JwksController]
+    B --> E[EmailPasswordStrategy + Registry]
+    E --> F[AuthService]
+    C --> F
+    F --> G[RefreshTokenService]
+    G --> H[AuthController + ApiExceptionHandler]
+```
+
+| # | Class | What it owes |
+|---|---|---|
+| 1 | `enums/AuthMethod`, `UserStatus`, `ErrorCode` | `EMAIL_PASSWORD` to start; `ACTIVE`/`DISABLED`; one error code per client-visible failure |
+| 2 | `exception/ArgusException` + subclasses | `InvalidCredentials`, `EmailAlreadyRegistered`, `AccountNotActive`, `InvalidRefreshToken` — each carries an `ErrorCode` |
+| 3 | `entity/*` | Mirrors V1 exactly: `users`, `roles`, `permissions`, `user_roles`, `role_permissions`, `refresh_tokens`, `auth_identities`. UUID ids, `timestamptz` → `OffsetDateTime` |
+| 4 | `repository/*` | `findByEmailIgnoreCase`, `findByTokenHash`, bulk `revokeFamily(familyId)` |
+| 5 | `config/TokenProperties` | `@ConfigurationProperties("argus.token")` — issuer, audience, access TTL (15m), refresh TTL (30d) |
+| 6 | `service/JwtKeyService` | RSA keypair from PEM config, generated fallback for local dev, stable `kid`, exposes the public JWK set |
+| 7 | `service/TokenIssuerService` | RS256 JWT with `iss sub aud exp iat jti roles permissions` and `kid` in the header |
+| 8 | `controller/JwksController` | `GET /.well-known/jwks.json`, public, no auth |
+| 9 | `service/auth/*` | Strategy interface returns a `UserEntity`; BCrypt verify in the email/password impl; registry fails loudly on an unknown `AuthMethod` |
+| 10 | `service/AuthService` | register (reject duplicate email, assign `USER` role) and login (strategy → status check → token pair) |
+| 11 | `service/RefreshTokenService` | store SHA-256 hash only; on refresh, rotate and mark used; a reused token revokes the whole family |
+| 12 | `controller/AuthController` + `ApiExceptionHandler` | the four auth endpoints; one error shape, one generic code for every login failure |
+| 13 | `config/SecurityConfig` | stateless, CSRF off, `/api/v1/auth/**` and `/.well-known/**` public, everything else authenticated |
+
+Things that must stay true as it grows:
+
+- Login failures never distinguish "no such user" from "wrong password" — that is a user-enumeration oracle.
+- Refresh tokens are only ever persisted as a SHA-256 hash. Same for passwords, via BCrypt.
+- Every write path is idempotent or guarded by a unique constraint; refresh is the one non-idempotent call, and reuse detection is what makes a retried refresh safe to reason about.
+- `service/` never imports from `controller/`, and no `dto/` type is accepted by or returned from a service — map at the controller edge.
 
 ---
 
@@ -167,8 +215,8 @@ Keeping the two separate matters: tests that share a real database are order-dep
 ## Roadmap
 
 - [x] Multi-module skeleton
-- [ ] Domain model and repository ports
-- [ ] Persistence — Flyway schema, JPA adapters
+- [x] Flyway schema — users, roles, permissions, refresh tokens, auth identities
+- [ ] Entities and repositories
 - [ ] RSA key management, JWT issuing, JWKS endpoint
 - [ ] Email + password registration and login
 - [ ] Refresh rotation with reuse detection
