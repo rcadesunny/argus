@@ -11,3 +11,11 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+
+argus:
+  token:
+    issuer: argus
+    audience: argus
+    access-token-ttl: PT15M
+    refresh-token-ttl: P30D
+    private-key-pem: ${ARGUS_JWT_PRIVATE_KEY:}
