@@ -1,3 +1,13 @@
 spring:
   application:
     name: argus-server
+  datasource:
+    url: ${ARGUS_DB_URL}
+    username: ${ARGUS_DB_USER}
+    password: ${ARGUS_DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
