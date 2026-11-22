@@ -8,6 +8,7 @@ import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import com.rcadium.argus.config.TokenProperties;
 import com.rcadium.argus.domain.Permission;
 import com.rcadium.argus.domain.Role;
 import com.rcadium.argus.domain.User;

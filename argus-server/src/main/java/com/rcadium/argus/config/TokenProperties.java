@@ -1,4 +1,4 @@
-package com.rcadium.argus.infrastructure.security;
+package com.rcadium.argus.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
