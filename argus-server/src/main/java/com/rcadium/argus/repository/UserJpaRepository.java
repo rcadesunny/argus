@@ -17,4 +17,8 @@ public interface UserJpaRepository extends JpaRepository<UserEntity, UUID> {
 
     @Query("select count(u) > 0 from UserEntity u where lower(u.email) = lower(:email)")
     boolean existsByEmail(String email);
+
+    @EntityGraph(attributePaths = {"roles", "roles.permissions"})
+    @Query("select u from UserEntity u where u.id = :id")
+    Optional<UserEntity> findByIdWithRoles(@Param("id") UUID id);
 }
